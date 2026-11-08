@@ -6,9 +6,9 @@ import math
 import time
 from datetime import date, datetime, timedelta, timezone
 
-import plotly.express as px
 import streamlit as st
 
+from chart import build_price_chart
 from data import SUPPORTED_EXCHANGES, TIMEFRAME, fetch_daily_ohlcv, gap_report
 from engine import filter_completed, scan, taps_for_zones
 from exporter import build_detail, build_summary, to_csv_bytes, to_excel_bytes
@@ -45,7 +45,6 @@ with st.sidebar:
     exchange = st.selectbox("Exchange", SUPPORTED_EXCHANGES, index=0)
     pair = st.text_input("Trading pair (spot)", "BTC/USDT")
     st.caption(f"Market: {MARKET} · Timeframe: daily ({TIMEFRAME})")
-
     today = date.today()
     start = st.date_input("Start date", today - timedelta(days=90))
     end = st.date_input("End date", today)
@@ -86,12 +85,11 @@ if not res:
 
 zones, candles, meta = res["zones"], res["candles"], res["meta"]
 width = res["width_pct"] / 100
-zones = zones.assign(
-    label=zones.apply(
-        lambda r: f"{r['zone_type']} {fmt_price(r['lower'])}–{fmt_price(r['upper'])} "
-                  f"({r['tap_count']} occurrences)", axis=1)
-)
-labels = dict(zip(zones["zone_id"], zones["label"]))
+labels = {
+    r["zone_id"]: (f"{r['zone_type']} {fmt_price(r['lower'])}–{fmt_price(r['upper'])} "
+                   f"({r['tap_count']} occurrences)")
+    for _, r in zones.iterrows()
+}
 
 # ---------- Scan summary ----------
 st.subheader(f"{meta['symbol']} · {meta['exchange']} · {meta['market']} · daily")
@@ -104,26 +102,44 @@ c2.metric("Total zones", len(zones))
 c3.metric("Total recorded taps", int(zones["tap_count"].sum()))
 c4.metric("Highest tap count", int(zones["tap_count"].max()) if len(zones) else 0)
 
-# ---------- Rankings ----------
-view = st.radio("Show zones", ["All", "High", "Low"], horizontal=True)
-shown = zones if view == "All" else zones[zones["zone_type"] == view]
+# ---------- Cluster table ----------
+st.subheader("Clusters")
+t1, t2 = st.columns(2)
+show_high_tbl = t1.checkbox("High", value=True, key="table_high")
+show_low_tbl = t2.checkbox("Low", value=True, key="table_low")
 
-table = shown[["zone_type", "lower", "upper", "reference_price",
-               "reference_time", "tap_count"]].copy()
-table["Cluster range"] = table.apply(
-    lambda r: f"{fmt_price(r['lower'])} – {fmt_price(r['upper'])}", axis=1)
-table["Daily High/Daily Low"] = table["reference_price"].map(fmt_price)
-table["Reference date"] = table["reference_time"].dt.strftime("%Y-%m-%d")
-table["Occurrences"] = table["tap_count"]
-table["Zone type"] = table["zone_type"]
-table = table[["Zone type", "Cluster range", "Daily High/Daily Low", "Reference date", "Occurrences"]]
-st.dataframe(table, hide_index=True, use_container_width=True)
+selected_types = [t for t, on in (("High", show_high_tbl), ("Low", show_low_tbl)) if on]
+if not selected_types:
+    st.info("Tick High, Low, or both to show clusters.")
+    shown = zones.iloc[0:0]
+else:
+    shown = zones[zones["zone_type"].isin(selected_types)]
+    table = shown[["reference_time", "zone_type", "reference_price",
+                   "lower", "upper", "tap_count"]].copy()
+    table["Date"] = table["reference_time"].dt.strftime("%Y-%m-%d")
+    table["High/Low"] = table["zone_type"]
+    table["DH/DL"] = table["reference_price"].map(fmt_price)
+    table["Cluster range"] = table.apply(
+        lambda r: f"{fmt_price(r['lower'])} – {fmt_price(r['upper'])}", axis=1)
+    table["Occurrences"] = table["tap_count"]
+    table = table[["Date", "High/Low", "DH/DL", "Cluster range", "Occurrences"]]
+    st.dataframe(table, hide_index=True, use_container_width=True)
 
-if len(shown):
-    fig = px.bar(shown.head(20), x="label", y="tap_count", color="zone_type",
-                 title="Top 20 zones by tap count")
-    fig.update_layout(xaxis_title=None, xaxis_tickangle=-35, height=420)
-    st.plotly_chart(fig, use_container_width=True)
+# ---------- Price chart ----------
+st.subheader("Price chart with clusters")
+p1, p2, p3 = st.columns([1, 1, 2])
+chart_high = p1.checkbox("Show High clusters", value=True, key="chart_high")
+chart_low = p2.checkbox("Show Low clusters", value=True, key="chart_low")
+max_occ = max(int(zones["tap_count"].max()) if len(zones) else 0, 1)
+min_occ = p3.slider("Minimum occurrences to draw", 0, max_occ, 0, key="min_occ",
+                    help="Hide weak clusters to reduce clutter on the chart.")
+
+chart_zones = zones[zones["tap_count"] >= min_occ]
+fig = build_price_chart(candles, chart_zones, chart_high, chart_low, fmt_price)
+st.plotly_chart(fig, use_container_width=True)
+st.caption("Red solid boxes = High clusters · Blue dashed boxes = Low clusters · "
+           "where they overlap, the colours blend and both outlines stay visible. "
+           "Hover a box for its range and occurrences.")
 
 # ---------- Zone details ----------
 st.subheader("Zone details")
@@ -135,7 +151,7 @@ if len(shown):
     d1.metric("Reference date", z["reference_time"].strftime("%Y-%m-%d"))
     d2.metric("Reference " + z["zone_type"].lower(), fmt_price(z["reference_price"]))
     d3.metric("Zone", f"{fmt_price(z['lower'])} – {fmt_price(z['upper'])}")
-    d4.metric("Taps", int(z["tap_count"]))
+    d4.metric("Occurrences", int(z["tap_count"]))
 
     zt = taps_for_zones(candles, zones[zones["zone_id"] == sel], width)[
         ["tap_time", "tap_high", "tap_low", "tested_price"]]
@@ -145,9 +161,9 @@ if len(shown):
             zt[col] = zt[col].map(fmt_price)
         st.dataframe(zt, hide_index=True, use_container_width=True)
     else:
-        st.write("No qualifying taps for this zone.")
+        st.write("No qualifying occurrences for this zone.")
 else:
-    st.write("No zones to show for this filter.")
+    st.write("No zones to show for this selection.")
 
 # ---------- Export ----------
 st.subheader("Export")
