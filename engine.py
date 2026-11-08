@@ -51,24 +51,33 @@ def _check_size(n: int):
         )
 
 
-def _zone_hits(prices: np.ndarray, width: float, start: int, end: int) -> np.ndarray:
+def _zone_hits(prices: np.ndarray, width: float, start: int, end: int,
+               forward_only: bool = False) -> np.ndarray:
     """
     Boolean matrix for reference rows [start, end):
-    hits[a, b] is True when candle b's value falls inside zone (start + a),
-    with the zone's own reference candle excluded.
+    hits[a, b] is True when candle b's value falls inside zone (start + a).
+    The zone's own reference candle is always excluded.
+    If forward_only is True, only candles AFTER the reference candle can tap.
     """
     lower = prices[start:end, None] * (1 - width)
     upper = prices[start:end, None] * (1 + width)
     hits = (prices[None, :] >= lower) & (prices[None, :] <= upper)
     rows = np.arange(end - start)
-    hits[rows, start + rows] = False
+    ref_idx = start + rows
+    if forward_only:
+        cols = np.arange(len(prices))
+        hits &= cols[None, :] > ref_idx[:, None]
+    else:
+        hits[rows, ref_idx] = False
     return hits
 
 
-def scan(df: pd.DataFrame, width: float = DEFAULT_WIDTH, chunk_size: int = 500) -> pd.DataFrame:
+def scan(df: pd.DataFrame, width: float = DEFAULT_WIDTH, chunk_size: int = 500,
+          forward_only: bool = False) -> pd.DataFrame:
     """
     Build all zones and count their taps. Returns one row per zone,
     ranked by tap_count (highest first).
+    forward_only=True counts only candles after each reference candle.
     """
     n = len(df)
     _check_size(n)
@@ -82,7 +91,7 @@ def scan(df: pd.DataFrame, width: float = DEFAULT_WIDTH, chunk_size: int = 500) 
         counts = np.zeros(n, dtype=np.int64)
         for start in range(0, n, chunk_size):
             end = min(start + chunk_size, n)
-            counts[start:end] = _zone_hits(prices, width, start, end).sum(axis=1)
+            counts[start:end] = _zone_hits(prices, width, start, end, forward_only).sum(axis=1)
         frames.append(pd.DataFrame({
             "zone_type": zone_type,
             "ref_index": np.arange(n),
@@ -103,7 +112,7 @@ def scan(df: pd.DataFrame, width: float = DEFAULT_WIDTH, chunk_size: int = 500) 
 
 
 def taps_for_zones(df: pd.DataFrame, zones: pd.DataFrame,
-                   width: float = DEFAULT_WIDTH) -> pd.DataFrame:
+                   width: float = DEFAULT_WIDTH, forward_only: bool = False) -> pd.DataFrame:
     """
     Individual tap records for the given zones (a subset of scan() output).
     Each row is one candle that tapped one zone, at most once per zone.
@@ -121,7 +130,7 @@ def taps_for_zones(df: pd.DataFrame, zones: pd.DataFrame,
         wanted = zones.loc[zones["zone_type"] == zone_type, "ref_index"].to_numpy()
         for ref in np.unique(wanted):  # one zone at a time keeps memory bounded
             ref = int(ref)
-            hits = _zone_hits(prices, width, ref, ref + 1)[0]
+            hits = _zone_hits(prices, width, ref, ref + 1, forward_only)[0]
             tj = np.nonzero(hits)[0]
             if len(tj) == 0:
                 continue

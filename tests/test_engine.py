@@ -162,5 +162,22 @@ class TestGuards(unittest.TestCase):
             scan(df)
 
 
+class TestForwardOnly(unittest.TestCase):
+    def test_earlier_candles_do_not_tap_when_forward_only(self):
+        # Candle 0 is earlier and has a high inside the zone of reference candle 2.
+        df = make_candles(highs=[100_500, 90_000, 100_000], lows=[99_000, 89_000, 99_000])
+        zones = scan(df, forward_only=True)
+        self.assertEqual(zone_row(zones, "High-2")["tap_count"], 0)
+        taps = taps_for_zones(df, zones, forward_only=True)
+        self.assertEqual(len(taps[taps.zone_id == "High-2"]), 0)
+
+    def test_later_candles_still_tap_when_forward_only(self):
+        df = make_candles(highs=[100_000, 98_000, 99_500, 100_800],
+                          lows=[95_000, 93_000, 94_500, 95_800])
+        zones = scan(df, forward_only=True)
+        self.assertEqual(zone_row(zones, "High-0")["tap_count"], 2)
+        self.assertEqual(zone_row(zones, "Low-0")["tap_count"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

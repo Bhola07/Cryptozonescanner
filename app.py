@@ -2,13 +2,14 @@
 Run with: streamlit run app.py
 """
 
+import math
 import time
 from datetime import date, datetime, timedelta, timezone
 
 import plotly.express as px
 import streamlit as st
 
-from data import SUPPORTED_EXCHANGES, TIMEFRAME, TIMEFRAME_MS, fetch_daily_ohlcv, gap_report
+from data import SUPPORTED_EXCHANGES, TIMEFRAME, fetch_daily_ohlcv, gap_report
 from engine import filter_completed, scan, taps_for_zones
 from exporter import build_detail, build_summary, to_csv_bytes, to_excel_bytes
 
@@ -30,12 +31,21 @@ def utc_ms(d: date) -> int:
     return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp() * 1000)
 
 
+def fmt_price(x: float) -> str:
+    """Show enough decimals for small prices: 100000 -> '100,000.00', 0.0004 -> '0.00040000'."""
+    if x == 0 or not math.isfinite(x):
+        return f"{x:,.2f}"
+    decimals = min(12, max(2, 4 - math.floor(math.log10(abs(x)))))
+    return f"{x:,.{decimals}f}"
+
+
 # ---------- Sidebar: New Scan ----------
 with st.sidebar:
     st.header("New scan")
     exchange = st.selectbox("Exchange", SUPPORTED_EXCHANGES, index=0)
     pair = st.text_input("Trading pair (spot)", "BTC/USDT")
     st.caption(f"Market: {MARKET} · Timeframe: daily ({TIMEFRAME})")
+
     today = date.today()
     start = st.date_input("Start date", today - timedelta(days=90))
     end = st.date_input("End date", today)
@@ -78,8 +88,8 @@ zones, candles, meta = res["zones"], res["candles"], res["meta"]
 width = res["width_pct"] / 100
 zones = zones.assign(
     label=zones.apply(
-        lambda r: f"#{r['rank']} {r['zone_type']} {r['lower']:,.2f}–{r['upper']:,.2f} "
-                  f"({r['tap_count']} taps)", axis=1)
+        lambda r: f"{r['zone_type']} {fmt_price(r['lower'])}–{fmt_price(r['upper'])} "
+                  f"({r['tap_count']} occurrences)", axis=1)
 )
 labels = dict(zip(zones["zone_id"], zones["label"]))
 
@@ -98,10 +108,16 @@ c4.metric("Highest tap count", int(zones["tap_count"].max()) if len(zones) else 
 view = st.radio("Show zones", ["All", "High", "Low"], horizontal=True)
 shown = zones if view == "All" else zones[zones["zone_type"] == view]
 
-table = shown[["rank", "zone_type", "lower", "upper", "reference_time",
-               "reference_price", "tap_count"]].copy()
-table["reference_time"] = table["reference_time"].dt.strftime("%Y-%m-%d")
-st.dataframe(table.round(2), hide_index=True, use_container_width=True)
+table = shown[["zone_type", "lower", "upper", "reference_price",
+               "reference_time", "tap_count"]].copy()
+table["Cluster range"] = table.apply(
+    lambda r: f"{fmt_price(r['lower'])} – {fmt_price(r['upper'])}", axis=1)
+table["Daily High/Daily Low"] = table["reference_price"].map(fmt_price)
+table["Reference date"] = table["reference_time"].dt.strftime("%Y-%m-%d")
+table["Occurrences"] = table["tap_count"]
+table["Zone type"] = table["zone_type"]
+table = table[["Zone type", "Cluster range", "Daily High/Daily Low", "Reference date", "Occurrences"]]
+st.dataframe(table, hide_index=True, use_container_width=True)
 
 if len(shown):
     fig = px.bar(shown.head(20), x="label", y="tap_count", color="zone_type",
@@ -117,15 +133,17 @@ if len(shown):
     z = zones[zones["zone_id"] == sel].iloc[0]
     d1, d2, d3, d4 = st.columns(4)
     d1.metric("Reference date", z["reference_time"].strftime("%Y-%m-%d"))
-    d2.metric("Reference " + z["zone_type"].lower(), f"{z['reference_price']:,.2f}")
-    d3.metric("Zone", f"{z['lower']:,.2f} – {z['upper']:,.2f}")
+    d2.metric("Reference " + z["zone_type"].lower(), fmt_price(z["reference_price"]))
+    d3.metric("Zone", f"{fmt_price(z['lower'])} – {fmt_price(z['upper'])}")
     d4.metric("Taps", int(z["tap_count"]))
 
     zt = taps_for_zones(candles, zones[zones["zone_id"] == sel], width)[
         ["tap_time", "tap_high", "tap_low", "tested_price"]]
     if len(zt):
         zt = zt.assign(tap_time=zt["tap_time"].dt.strftime("%Y-%m-%d"))
-        st.dataframe(zt.round(2), hide_index=True, use_container_width=True)
+        for col in ["tap_high", "tap_low", "tested_price"]:
+            zt[col] = zt[col].map(fmt_price)
+        st.dataframe(zt, hide_index=True, use_container_width=True)
     else:
         st.write("No qualifying taps for this zone.")
 else:
