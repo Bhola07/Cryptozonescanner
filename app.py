@@ -6,6 +6,7 @@ import math
 import time
 from datetime import date, datetime, timedelta, timezone
 
+import pandas as pd
 import streamlit as st
 
 from chart import build_price_chart
@@ -14,6 +15,8 @@ from engine import filter_completed, scan, taps_for_zones
 from exporter import build_detail, build_summary, to_csv_bytes, to_excel_bytes
 
 MARKET = "spot"
+HIGH_TINT = "rgba(239, 68, 68, 0.15)"
+LOW_TINT = "rgba(59, 130, 246, 0.15)"
 EXPORT_TAP_LIMIT = 500_000  # full tap exports above this would be too heavy
 
 st.set_page_config(page_title="Crypto Zone Scanner", layout="wide")
@@ -103,27 +106,44 @@ c3.metric("Total recorded taps", int(zones["tap_count"].sum()))
 c4.metric("Highest tap count", int(zones["tap_count"].max()) if len(zones) else 0)
 
 # ---------- Cluster table ----------
-st.subheader("Clusters")
+st.subheader("Clusters by day")
 t1, t2 = st.columns(2)
 show_high_tbl = t1.checkbox("High", value=True, key="table_high")
 show_low_tbl = t2.checkbox("Low", value=True, key="table_low")
 
-selected_types = [t for t, on in (("High", show_high_tbl), ("Low", show_low_tbl)) if on]
-if not selected_types:
+if not (show_high_tbl or show_low_tbl):
     st.info("Tick High, Low, or both to show clusters.")
     shown = zones.iloc[0:0]
 else:
+    hi = zones[zones["zone_type"] == "High"].sort_values("ref_index")
+    lo = zones[zones["zone_type"] == "Low"].sort_values("ref_index")
+    table = pd.DataFrame({"Date": hi["reference_time"].dt.strftime("%Y-%m-%d").to_numpy()})
+
+    high_cols, low_cols = [], []
+    if show_high_tbl:
+        table["High DH"] = hi["reference_price"].map(fmt_price).to_numpy()
+        table["High cluster range"] = [
+            f"{fmt_price(a)} – {fmt_price(b)}" for a, b in zip(hi["lower"], hi["upper"])]
+        table["High occurrences"] = hi["tap_count"].to_numpy()
+        high_cols = ["High DH", "High cluster range", "High occurrences"]
+    if show_low_tbl:
+        table["Low DL"] = lo["reference_price"].map(fmt_price).to_numpy()
+        table["Low cluster range"] = [
+            f"{fmt_price(a)} – {fmt_price(b)}" for a, b in zip(lo["lower"], lo["upper"])]
+        table["Low occurrences"] = lo["tap_count"].to_numpy()
+        low_cols = ["Low DL", "Low cluster range", "Low occurrences"]
+
+    table = table.iloc[::-1].reset_index(drop=True)  # newest day first
+
+    styler = table.style.hide(axis="index")
+    if high_cols:
+        styler = styler.set_properties(subset=high_cols, **{"background-color": HIGH_TINT})
+    if low_cols:
+        styler = styler.set_properties(subset=low_cols, **{"background-color": LOW_TINT})
+    st.dataframe(styler, use_container_width=True)
+
+    selected_types = [t for t, on in (("High", show_high_tbl), ("Low", show_low_tbl)) if on]
     shown = zones[zones["zone_type"].isin(selected_types)]
-    table = shown[["reference_time", "zone_type", "reference_price",
-                   "lower", "upper", "tap_count"]].copy()
-    table["Date"] = table["reference_time"].dt.strftime("%Y-%m-%d")
-    table["High/Low"] = table["zone_type"]
-    table["DH/DL"] = table["reference_price"].map(fmt_price)
-    table["Cluster range"] = table.apply(
-        lambda r: f"{fmt_price(r['lower'])} – {fmt_price(r['upper'])}", axis=1)
-    table["Occurrences"] = table["tap_count"]
-    table = table[["Date", "High/Low", "DH/DL", "Cluster range", "Occurrences"]]
-    st.dataframe(table, hide_index=True, use_container_width=True)
 
 # ---------- Price chart ----------
 st.subheader("Price chart with clusters")
