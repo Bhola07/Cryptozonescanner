@@ -9,14 +9,14 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
-from chart import build_price_chart
+from chart import build_zone_chart
 from data import SUPPORTED_EXCHANGES, TIMEFRAME, fetch_daily_ohlcv, gap_report
 from engine import filter_completed, scan, taps_for_zones
 from exporter import build_detail, build_summary, to_csv_bytes, to_excel_bytes
 
 MARKET = "spot"
-HIGH_TINT = "rgba(239, 68, 68, 0.15)"
-LOW_TINT = "rgba(59, 130, 246, 0.15)"
+HIGH_TINT = "rgba(34, 197, 94, 0.15)"
+LOW_TINT = "rgba(239, 68, 68, 0.15)"
 EXPORT_TAP_LIMIT = 500_000  # full tap exports above this would be too heavy
 
 st.set_page_config(page_title="Crypto Zone Scanner", layout="wide")
@@ -146,20 +146,32 @@ else:
     shown = zones[zones["zone_type"].isin(selected_types)]
 
 # ---------- Price chart ----------
-st.subheader("Price chart with clusters")
-p1, p2, p3 = st.columns([1, 1, 2])
+st.subheader("Zone chart")
+p1, p2, p4, p3 = st.columns([1, 1, 1, 2])
 chart_high = p1.checkbox("Show High clusters", value=True, key="chart_high")
 chart_low = p2.checkbox("Show Low clusters", value=True, key="chart_low")
+show_dots = p4.checkbox("Show tap dots", value=True, key="chart_dots")
 max_occ = max(int(zones["tap_count"].max()) if len(zones) else 0, 1)
 min_occ = p3.slider("Minimum occurrences to draw", 0, max_occ, 0, key="min_occ",
                     help="Hide weak clusters to reduce clutter on the chart.")
 
 chart_zones = zones[zones["tap_count"] >= min_occ]
-fig = build_price_chart(candles, chart_zones, chart_high, chart_low, fmt_price)
-st.plotly_chart(fig, use_container_width=True)
-st.caption("Red solid boxes = High clusters · Blue dashed boxes = Low clusters · "
-           "where they overlap, the colours blend and both outlines stay visible. "
-           "Hover a box for its range and occurrences.")
+MAX_DOT_TAPS = 50_000  # above this the chart would be too heavy to draw
+chart_taps = None
+if show_dots:
+    tapped = chart_zones[chart_zones["tap_count"] > 0]
+    if int(tapped["tap_count"].sum()) <= MAX_DOT_TAPS:
+        chart_taps = taps_for_zones(candles, tapped, width)
+    else:
+        st.caption("Too many taps to draw dots. Raise the minimum occurrences to show them.")
+fig = build_zone_chart(candles, chart_zones, chart_high, chart_low, fmt_price, chart_taps)
+if fig is None:
+    st.info("Tick Show High clusters, Show Low clusters, or both.")
+else:
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Green = High clusters (left) · Red = Low clusters (right). "
+               "Each box shows its cluster range. Dots mark the days a cluster was tapped, "
+               "at the tapped price. Hover a dot for details.")
 
 # ---------- Zone details ----------
 st.subheader("Zone details")

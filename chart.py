@@ -1,75 +1,72 @@
 """
-Price-timeframe chart with cluster zones drawn on top of the candles.
+Zone chart: price on the vertical axis, time on the horizontal axis.
+No candles are drawn. Only the cluster boxes appear.
 
-Colour and line-style scheme (chosen so overlapping zones stay distinguishable):
-- High clusters: red fill, solid outline.
-- Low clusters:  blue fill, dashed outline.
-- Where a High and a Low overlap, the fills blend (purple) and the two outlines
-  remain visible as solid red and dashed blue.
-- Candles are neutral grey so they don't compete with the zone colours.
+Layout:
+- High clusters are drawn in the LEFT panel, Low clusters in the RIGHT panel.
+  Both panels share the same price scale, so their boxes never overlap.
+- Colours follow trading-chart convention: green = High, red = Low.
+- Each box is labelled with its cluster range.
 """
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-HIGH_LINE = "#ef4444"
-LOW_LINE = "#3b82f6"
-HIGH_FILL = "rgba(239, 68, 68, 0.22)"
-LOW_FILL = "rgba(59, 130, 246, 0.22)"
-CANDLE_UP = "#d1d5db"
-CANDLE_DOWN = "#6b7280"
+HIGH_LINE = "#22c55e"  # green
+HIGH_FILL = "rgba(34, 197, 94, 0.20)"
+LOW_LINE = "#ef4444"   # red
+LOW_FILL = "rgba(239, 68, 68, 0.20)"
 
 
-def build_price_chart(candles: pd.DataFrame, zones: pd.DataFrame,
-                      show_high: bool, show_low: bool, fmt) -> go.Figure:
+def build_zone_chart(candles: pd.DataFrame, zones: pd.DataFrame,
+                     show_high: bool, show_low: bool, fmt, taps: pd.DataFrame = None):
     """
-    candles: completed daily candles (timestamp, open, high, low, close).
+    candles: completed daily candles (used only for the chart's time range).
     zones:   output of engine.scan(), already filtered for minimum occurrences.
     fmt:     price formatter, e.g. fmt_price from the app.
+    Returns a Plotly figure, or None if neither side is selected.
     """
-    fig = go.Figure()
+    types = [t for t, on in (("High", show_high), ("Low", show_low)) if on]
+    if not types:
+        return None
+
+    fig = make_subplots(
+        rows=1, cols=len(types), shared_yaxes=True,
+        subplot_titles=[f"{t} clusters" for t in types],
+        horizontal_spacing=0.04,
+    )
+
     times = pd.to_datetime(candles["timestamp"], unit="ms", utc=True)
+    last_time = times.max() if len(times) else None
 
-    fig.add_trace(go.Candlestick(
-        x=times, open=candles["open"], high=candles["high"],
-        low=candles["low"], close=candles["close"],
-        name="Price", showlegend=False,
-        increasing_line_color=CANDLE_UP, increasing_fillcolor=CANDLE_UP,
-        decreasing_line_color=CANDLE_DOWN, decreasing_fillcolor=CANDLE_DOWN,
-    ))
-
-    # Legend entries (dummy traces so the legend explains the colours).
-    fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
-                             line=dict(color=HIGH_LINE, width=2),
-                             name="High cluster", visible=show_high or "legendonly"))
-    fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
-                             line=dict(color=LOW_LINE, width=2, dash="dash"),
-                             name="Low cluster", visible=show_low or "legendonly"))
-
-    if len(times) == 0:
-        fig.update_layout(height=600)
-        return fig
-
-    last_time = times.iloc[-1]
-    for zone_type, enabled in (("High", show_high), ("Low", show_low)):
-        if not enabled:
-            continue
-        sub = zones[zones["zone_type"] == zone_type]
+    for col, zone_type in enumerate(types, start=1):
         is_high = zone_type == "High"
+        line = HIGH_LINE if is_high else LOW_LINE
+        fill = HIGH_FILL if is_high else LOW_FILL
+        sub = zones[zones["zone_type"] == zone_type]
 
-        # Boxes: from the reference candle to the end of the chart.
         for _, z in sub.iterrows():
+            # Box runs from the reference candle to the end of the data.
             fig.add_shape(
-                type="rect", xref="x", yref="y",
+                type="rect",
                 x0=z["reference_time"], x1=last_time,
                 y0=z["lower"], y1=z["upper"],
-                fillcolor=HIGH_FILL if is_high else LOW_FILL,
-                line=dict(color=HIGH_LINE if is_high else LOW_LINE,
-                          width=1.5, dash="solid" if is_high else "dash"),
+                fillcolor=fill,
+                line=dict(color=line, width=1.5),
                 layer="below",
+                row=1, col=col,
+            )
+            # Cluster range label at the top-left inside the box.
+            fig.add_annotation(
+                x=z["reference_time"], y=z["upper"],
+                text=f"{fmt(z['lower'])} – {fmt(z['upper'])}",
+                showarrow=False, xanchor="left", yanchor="top",
+                font=dict(size=10, color=line),
+                row=1, col=col,
             )
 
-        # Invisible markers carry the hover details for each cluster.
+        # Invisible markers carry hover details (range, reference date, occurrences).
         if len(sub):
             hover = [
                 f"<b>{zone_type} cluster</b><br>"
@@ -85,15 +82,34 @@ def build_price_chart(candles: pd.DataFrame, zones: pd.DataFrame,
                 marker=dict(size=10, color="rgba(0,0,0,0)"),
                 hovertext=hover, hoverinfo="text",
                 showlegend=False,
-            ))
+            ), row=1, col=col)
+
+        # Tap dots: one dot per candle that tapped this cluster, placed on the
+        # day of the tap at the price that touched the zone.
+        if taps is not None and len(taps):
+            tp = taps[taps["zone_type"] == zone_type]
+            if len(tp):
+                tap_hover = [
+                    f"<b>{zone_type} cluster tap</b><br>"
+                    f"Cluster range: {fmt(r['lower'])} – {fmt(r['upper'])}<br>"
+                    f"Reference: {r['reference_time']:%Y-%m-%d}<br>"
+                    f"Tapped on: {r['tap_time']:%Y-%m-%d}<br>"
+                    f"Candle high: {fmt(r['tap_high'])}<br>"
+                    f"Candle low: {fmt(r['tap_low'])}<br>"
+                    f"Tested price: {fmt(r['tested_price'])}"
+                    for _, r in tp.iterrows()
+                ]
+                fig.add_trace(go.Scatter(
+                    x=tp["tap_time"], y=tp["tested_price"], mode="markers",
+                    marker=dict(size=8, color=line, line=dict(color="white", width=1)),
+                    hovertext=tap_hover, hoverinfo="text", showlegend=False,
+                ), row=1, col=col)
 
     fig.update_layout(
         height=640,
         hovermode="closest",
-        xaxis_rangeslider_visible=False,
         yaxis_title="Price",
-        xaxis_title=None,
-        legend=dict(orientation="h", y=1.08, x=0),
-        margin=dict(l=10, r=10, t=40, b=10),
+        margin=dict(l=10, r=10, t=50, b=10),
+        showlegend=False,
     )
     return fig
