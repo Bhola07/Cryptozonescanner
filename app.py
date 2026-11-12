@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
-from chart import build_zone_chart
+from chart import build_lane_chart
 from data import SUPPORTED_EXCHANGES, TIMEFRAME, fetch_daily_ohlcv, gap_report
 from db import list_scans, load_scan, save_scan
 from engine import filter_completed, scan, taps_for_zones
@@ -158,11 +158,6 @@ labels = {
                    f"({r['occurrences']} occurrences)")
     for _, r in zones.iterrows()
 }
-labels_short = {
-    r["zone_id"]: (f"{r['zone_type']} {fmt_price(r['lower'])} – {fmt_price(r['upper'])} · "
-                   f"{r['occurrences']} occ · {r['reference_time']:%Y-%m-%d}")
-    for _, r in zones.iterrows()
-}
 
 # ---------- Scan summary ----------
 st.subheader(f"{meta['symbol']} · {meta['exchange']} · {meta['market']} · daily")
@@ -218,52 +213,38 @@ else:
     selected_types = [t for t, on in (("High", show_high_tbl), ("Low", show_low_tbl)) if on]
     shown = zones[zones["zone_type"].isin(selected_types)]
 
-# ---------- Zone chart ----------
+# ---------- Zone lanes chart ----------
 st.subheader("Zone chart")
 max_side = max(int(zones.groupby("zone_type").size().max()), 1) if len(zones) else 1
 if st.session_state.get("top_n", 10) > max_side:
     st.session_state["top_n"] = max_side
 
-r1 = st.columns([1, 1, 1, 1, 2])
-chart_high = r1[0].checkbox("Show High clusters", value=True, key="chart_high")
-chart_low = r1[1].checkbox("Show Low clusters", value=True, key="chart_low")
-show_labels = r1[2].checkbox("Show labels", value=True, key="chart_labels")
-show_dots = r1[3].checkbox("Show tap dots", value=True, key="chart_dots")
-top_n = r1[4].slider("Labelled zones per side (top by occurrences)", 1, max_side,
+r1 = st.columns([1, 1, 2])
+chart_high = r1[0].checkbox("Show High zones", value=True, key="chart_high")
+chart_low = r1[1].checkbox("Show Low zones", value=True, key="chart_low")
+top_n = r1[2].slider("Zones per side (ranked by occurrences)", 1, max_side,
                      min(10, max_side), key="top_n")
 
-focus_ids = zones.sort_values("occurrences", ascending=False)["zone_id"].tolist()
-focus_pick = st.selectbox(
-    "Highlight one zone (bold outline, its label and tap dots)",
-    ["none"] + focus_ids,
-    format_func=lambda z: "None" if z == "none" else labels_short[z],
-    key="highlight",
-)
-highlight_id = None if focus_pick == "none" else focus_pick
-
 ranked_all = zones.sort_values(["occurrences", "reference_time"], ascending=[False, False])
-label_ids = set(ranked_all.groupby("zone_type").head(top_n)["zone_id"])
-if highlight_id is not None:
-    label_ids.add(highlight_id)
+shown_ids = set(ranked_all.groupby("zone_type").head(top_n)["zone_id"])
+shown_zones = zones[zones["zone_id"].isin(shown_ids)]
 
-dot_zones = zones[zones["zone_id"].isin(label_ids) & (zones["tap_count"] > 0)]
-chart_taps = None
-if show_dots:
-    if int(dot_zones["tap_count"].sum()) <= MAX_CHART_TAPS:
-        chart_taps = taps_for_zones(candles, dot_zones, width)
-    else:
-        st.caption("Too many taps to draw dots. Lower the labelled zones count.")
+lane_taps = None
+lane_tap_total = int(shown_zones["tap_count"].sum())
+if lane_tap_total <= MAX_CHART_TAPS:
+    lane_taps = taps_for_zones(candles, shown_zones[shown_zones["tap_count"] > 0], width)
+else:
+    st.caption("Too many taps to draw dots. Lower the zones per side.")
 
-fig = build_zone_chart(candles, zones, chart_high, chart_low, fmt_price, chart_taps,
-                       show_labels=show_labels, show_dots=show_dots,
-                       top_n=top_n, highlight_id=highlight_id)
+fig, rows = build_lane_chart(candles, zones, lane_taps, chart_high, chart_low,
+                             fmt_price, top_n)
 if fig is None:
-    st.info("Tick Show High clusters, Show Low clusters, or both.")
+    st.info("Tick Show High zones, Show Low zones, or both.")
 else:
     st.plotly_chart(fig, use_container_width=True)
-    st.caption(f"Green = High (left) · Red = Low (right). Labelled boxes = top {top_n} per side "
-               "by occurrences; other zones are faint outlines. Dots mark the days a labelled "
-               "zone was tapped. Hover any box for its full details.")
+    st.caption(f"{rows} zone rows, ranked by occurrences. Each row is one zone, so zones never "
+               "overlap. ◆ = reference candle (occurrence 1). Dots = taps. Hover a bar for the "
+               "zone's details and a dot for that tap's details.")
 
 # ---------- Zone details ----------
 st.subheader("Zone details")
