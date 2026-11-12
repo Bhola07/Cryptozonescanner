@@ -25,7 +25,8 @@ LOW_TINT = "rgba(239, 68, 68, 0.15)"    # red, matches Low clusters
 EXPORT_TAP_LIMIT = 500_000
 MAX_CHART_TAPS = 50_000
 
-st.set_page_config(page_title="Crypto Zone Scanner", layout="wide")
+st.set_page_config(page_title="Crypto Zone Scanner", layout="wide",
+                   initial_sidebar_state="auto")  # auto = closed on phones, open on desktop
 st.title("Crypto Zone Scanner — MVP")
 st.caption("Historical daily high/low zone tap counter · spot markets · "
            "analysis only, not a trading tool.")
@@ -34,6 +35,24 @@ st.caption("Historical daily high/low zone tap counter · spot markets · "
 @st.cache_data(ttl=900, show_spinner="Fetching daily candles from exchange...")
 def load(exchange, pair, since_ms, end_ms):
     return fetch_daily_ohlcv(exchange, pair, since_ms, end_ms)
+
+
+COLLAPSE_SIDEBAR_JS = """
+<script>
+// nonce %f
+(function () {
+  const doc = window.parent.document;
+  function collapse() {
+    const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+    const btn = doc.querySelector('[data-testid="stSidebarCollapseButton"] button');
+    if (sidebar && btn && sidebar.getBoundingClientRect().width > 50) {
+      btn.click();  // Streamlit's own button, so the close animation is the built-in one
+    }
+  }
+  setTimeout(collapse, 200);
+})();
+</script>
+"""
 
 
 def utc_ms(d: date) -> int:
@@ -78,6 +97,7 @@ def open_saved(scan_id):
                                            row["forming_dropped"])
     st.session_state["res_saved_at"] = row["saved_at"]
     st.session_state["res_restored"] = True
+    st.session_state["collapse_sidebar"] = True
 
 
 # ---------- Defaults and restore the last search ----------
@@ -101,7 +121,7 @@ with st.sidebar:
     start = st.date_input("Start date", key="start")
     end = st.date_input("End date", key="end")
     width_pct = st.slider("Zone width (±%)", 0.1, 5.0, step=0.1, key="width_pct")
-    run = st.button("Run scan", type="primary", use_container_width=True)
+    run = st.button("Run scan", type="primary", width="stretch")
 
     st.divider()
     st.subheader("Saved searches (all users)")
@@ -116,7 +136,7 @@ with st.sidebar:
         }
         pick = st.selectbox("Pick a saved search", list(saved_labels),
                             format_func=lambda i: saved_labels[i], key="recent_pick")
-        st.button("Open selected search", use_container_width=True,
+        st.button("Open selected search", width="stretch",
                   on_click=open_saved, args=(pick,))
     else:
         st.caption("No saved searches yet. Run a scan and it will appear here.")
@@ -145,11 +165,16 @@ if run:
                 save_scan(exchange, pair_clean, since_ms, end_ms, width_pct, completed, dropped)
                 st.session_state["res_saved_at"] = "just now"
                 st.session_state["res_restored"] = False
+                st.session_state["collapse_sidebar"] = True
 
 res = st.session_state.get("res")
 if not res:
     st.info("Configure a scan in the sidebar and press Run scan.")
     st.stop()
+
+# Slide the sidebar closed after a search, so the results have the full screen.
+if st.session_state.pop("collapse_sidebar", False):
+    st.iframe(COLLAPSE_SIDEBAR_JS % time.time(), height=1)
 
 zones, candles, meta = res["zones"], res["candles"], res["meta"]
 width = res["width_pct"] / 100
@@ -208,43 +233,58 @@ else:
         styler = styler.set_properties(subset=high_cols, **{"background-color": HIGH_TINT})
     if low_cols:
         styler = styler.set_properties(subset=low_cols, **{"background-color": LOW_TINT})
-    st.dataframe(styler, use_container_width=True)
+    widths = {"Date": "small", "High DH": "small", "High cluster range": "medium",
+              "High occurrences": "small", "Low DL": "small",
+              "Low cluster range": "medium", "Low occurrences": "small"}
+    col_cfg = {}
+    for name, w in widths.items():
+        if name not in table.columns:
+            continue
+        if "occurrences" in name:
+            col_cfg[name] = st.column_config.NumberColumn(name, width=w)
+        else:
+            col_cfg[name] = st.column_config.TextColumn(name, width=w)
+    st.dataframe(styler, width="stretch", column_config=col_cfg)
 
     selected_types = [t for t, on in (("High", show_high_tbl), ("Low", show_low_tbl)) if on]
     shown = zones[zones["zone_type"].isin(selected_types)]
 
 # ---------- Zone lanes chart ----------
 st.subheader("Zone chart")
-max_side = max(int(zones.groupby("zone_type").size().max()), 1) if len(zones) else 1
-if st.session_state.get("top_n", 10) > max_side:
-    st.session_state["top_n"] = max_side
+max_occ = max(int(zones["occurrences"].max()) if len(zones) else 1, 1)
+if st.session_state.get("min_occ", 1) > max_occ:
+    st.session_state["min_occ"] = max_occ
 
 r1 = st.columns([1, 1, 2])
 chart_high = r1[0].checkbox("Show High zones", value=True, key="chart_high")
 chart_low = r1[1].checkbox("Show Low zones", value=True, key="chart_low")
-top_n = r1[2].slider("Zones per side (ranked by occurrences)", 1, max_side,
-                     min(10, max_side), key="top_n")
+min_occ = r1[2].slider("Minimum occurrences to show", 1, max_occ, 1, key="min_occ",
+                       help="Hides zones with fewer occurrences than this.")
 
-ranked_all = zones.sort_values(["occurrences", "reference_time"], ascending=[False, False])
-shown_ids = set(ranked_all.groupby("zone_type").head(top_n)["zone_id"])
-shown_zones = zones[zones["zone_id"].isin(shown_ids)]
+shown_zones = zones[zones["occurrences"] >= min_occ]
 
 lane_taps = None
 lane_tap_total = int(shown_zones["tap_count"].sum())
 if lane_tap_total <= MAX_CHART_TAPS:
     lane_taps = taps_for_zones(candles, shown_zones[shown_zones["tap_count"] > 0], width)
 else:
-    st.caption("Too many taps to draw dots. Lower the zones per side.")
+    st.caption("Too many taps to draw dots. Raise the minimum occurrences.")
 
 fig, rows = build_lane_chart(candles, zones, lane_taps, chart_high, chart_low,
-                             fmt_price, top_n)
+                             fmt_price, min_occ)
 if fig is None:
     st.info("Tick Show High zones, Show Low zones, or both.")
+elif rows == 0:
+    st.info(f"No zones have {min_occ} or more occurrences. Lower the minimum.")
 else:
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(f"{rows} zone rows, ranked by occurrences. Each row is one zone, so zones never "
-               "overlap. ◆ = reference candle (occurrence 1). Dots = taps. Hover a bar for the "
-               "zone's details and a dot for that tap's details.")
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "responsive": True})
+    st.caption(f"{rows} zone rows with at least {min_occ} occurrence(s), ranked by occurrences. "
+               "Row labels end with (occurrences). Each row is one zone, so zones never overlap. "
+               "◆ = reference candle (occurrence 1). Dots = taps. Hover a bar for the zone's "
+               "details and a dot for that tap's details.")
+    if rows > 60:
+        st.warning(f"{rows} rows is a tall chart on a phone. Raise the minimum occurrences "
+                   "to show fewer.")
 
 # ---------- Zone details ----------
 st.subheader("Zone details")
@@ -265,7 +305,7 @@ if len(shown):
         zt = zt.assign(tap_time=zt["tap_time"].dt.strftime("%Y-%m-%d"))
         for col in ["tap_high", "tap_low", "tested_price"]:
             zt[col] = zt[col].map(fmt_price)
-        st.dataframe(zt, hide_index=True, use_container_width=True)
+        st.dataframe(zt, hide_index=True, width="stretch")
     else:
         st.write("No taps for this zone yet (occurrence = the reference candle only).")
 else:

@@ -29,21 +29,21 @@ def _rgba(hex_color: str, alpha: float) -> str:
 
 
 def build_lane_chart(candles: pd.DataFrame, zones: pd.DataFrame, taps: pd.DataFrame,
-                     show_high: bool, show_low: bool, fmt, top_n: int):
+                     show_high: bool, show_low: bool, fmt, min_occ: int):
     """
     candles: completed daily candles (used for the time range).
     zones:   scan() output with an 'occurrences' column.
     taps:    tap records for the zones shown (may be None to skip dots).
     fmt:     price formatter (fmt_price from the app).
-    top_n:   zones per side to show, ranked by occurrences.
+    min_occ: only zones with at least this many occurrences are drawn.
     Returns (figure, number_of_rows), or (None, 0) if nothing is selected.
     """
     selected = []
     for zone_type, on in (("High", show_high), ("Low", show_low)):
         if not on:
             continue
-        sub = zones[zones["zone_type"] == zone_type].sort_values(
-            ["occurrences", "reference_time"], ascending=[False, False]).head(top_n)
+        sub = zones[(zones["zone_type"] == zone_type) & (zones["occurrences"] >= min_occ)]
+        sub = sub.sort_values(["occurrences", "reference_time"], ascending=[False, False])
         selected.extend(sub.to_dict("records"))
     if not selected:
         return None, 0
@@ -67,7 +67,7 @@ def build_lane_chart(candles: pd.DataFrame, zones: pd.DataFrame, taps: pd.DataFr
         n_taps = int(z["tap_count"])
         rng = f"{fmt(z['lower'])} – {fmt(z['upper'])}"
         tick_vals.append(y)
-        tick_text.append(f"{kind}  {rng}  ·  {occ} occ")
+        tick_text.append(f"{kind} {rng} ({occ})")
 
         # Alternating row band for readability.
         if i % 2 == 0:
@@ -137,6 +137,7 @@ def build_lane_chart(candles: pd.DataFrame, zones: pd.DataFrame, taps: pd.DataFr
     height = max(MIN_HEIGHT_PX, 90 + n * ROW_HEIGHT_PX)
     fig.update_layout(
         height=height,
+        autosize=True,
         hovermode="closest",
         paper_bgcolor=BG,
         plot_bgcolor=BG,
