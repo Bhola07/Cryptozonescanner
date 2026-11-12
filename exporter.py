@@ -18,13 +18,15 @@ def build_summary(zones: pd.DataFrame, taps: pd.DataFrame, meta: dict) -> pd.Dat
             .agg("; ".join)
         )
     out = zones.copy()
+    out["taps"] = out["tap_count"]
+    out["occurrences"] = out["tap_count"] + 1  # reference candle counts as the first occurrence
     out["reference_date"] = out["reference_time"].dt.strftime(TIME_FMT)
     out["tap_dates"] = out["zone_id"].map(tap_dates).fillna("")
     out = out.assign(**meta)
     return out[[
         "exchange", "market", "symbol", "timeframe", "rank", "zone_type",
         "reference_date", "reference_price", "lower", "upper",
-        "tap_count", "tap_dates",
+        "taps", "occurrences", "tap_dates",
     ]]
 
 
