@@ -14,6 +14,7 @@ from data import SUPPORTED_EXCHANGES, TIMEFRAME, fetch_daily_ohlcv, gap_report
 from db import list_scans, load_scan, save_scan
 from engine import filter_completed, scan, taps_for_zones
 from exporter import build_detail, build_summary, to_csv_bytes, to_excel_bytes
+from hotspots import find_hotspots
 
 MARKET = "spot"
 DEFAULT_EXCHANGE = "gate"
@@ -53,6 +54,30 @@ COLLAPSE_SIDEBAR_JS = """
 })();
 </script>
 """
+
+
+def render_side_table(zones, kind: str):
+    """One table per side (High or Low). Each table sorts independently."""
+    sub = zones[zones["zone_type"] == kind].sort_values("reference_time", ascending=False)
+    price_col = "DH" if kind == "High" else "DL"
+    table = pd.DataFrame({
+        "Date": sub["reference_time"].dt.strftime("%Y-%m-%d").to_numpy(),
+        price_col: sub["reference_price"].map(fmt_price).to_numpy(),
+        "Cluster range": [f"{fmt_price(a)} – {fmt_price(b)}"
+                          for a, b in zip(sub["lower"], sub["upper"])],
+        "Occurrences": sub["occurrences"].to_numpy(),
+    })
+    tint = HIGH_TINT if kind == "High" else LOW_TINT
+    styler = (table.style.hide(axis="index")
+              .set_properties(subset=[price_col, "Cluster range", "Occurrences"],
+                              **{"background-color": tint}))
+    st.markdown(f"**{kind} clusters**")
+    st.dataframe(styler, width="stretch", column_config={
+        "Date": st.column_config.TextColumn("Date", width="small"),
+        price_col: st.column_config.TextColumn(price_col, width="small"),
+        "Cluster range": st.column_config.TextColumn("Cluster range", width="medium"),
+        "Occurrences": st.column_config.NumberColumn("Occurrences", width="small"),
+    })
 
 
 def utc_ms(d: date) -> int:
@@ -198,58 +223,23 @@ c2.metric("Total zones", len(zones))
 c3.metric("Total taps", int(zones["tap_count"].sum()))
 c4.metric("Highest occurrences", int(zones["occurrences"].max()) if len(zones) else 0)
 
-# ---------- Cluster table: one row per day, High left, Low right ----------
+# ---------- Cluster tables: High and Low, separate and side by side ----------
 st.subheader("Clusters by day")
-t1, t2 = st.columns(2)
-show_high_tbl = t1.checkbox("High", value=True, key="table_high")
-show_low_tbl = t2.checkbox("Low", value=True, key="table_low")
+h_box, l_box = st.columns(2)
+show_high_tbl = h_box.checkbox("High", value=True, key="table_high")
+show_low_tbl = l_box.checkbox("Low", value=True, key="table_low")
 
-if not (show_high_tbl or show_low_tbl):
+sides = [k for k, on in (("High", show_high_tbl), ("Low", show_low_tbl)) if on]
+if not sides:
     st.info("Tick High, Low, or both to show clusters.")
     shown = zones.iloc[0:0]
 else:
-    hi = zones[zones["zone_type"] == "High"].sort_values("ref_index")
-    lo = zones[zones["zone_type"] == "Low"].sort_values("ref_index")
-    table = pd.DataFrame({"Date": hi["reference_time"].dt.strftime("%Y-%m-%d").to_numpy()})
+    for col, kind in zip(st.columns(len(sides)), sides):
+        with col:
+            render_side_table(zones, kind)
+    shown = zones[zones["zone_type"].isin(sides)]
 
-    high_cols, low_cols = [], []
-    if show_high_tbl:
-        table["High DH"] = hi["reference_price"].map(fmt_price).to_numpy()
-        table["High cluster range"] = [
-            f"{fmt_price(a)} – {fmt_price(b)}" for a, b in zip(hi["lower"], hi["upper"])]
-        table["High occurrences"] = hi["occurrences"].to_numpy()
-        high_cols = ["High DH", "High cluster range", "High occurrences"]
-    if show_low_tbl:
-        table["Low DL"] = lo["reference_price"].map(fmt_price).to_numpy()
-        table["Low cluster range"] = [
-            f"{fmt_price(a)} – {fmt_price(b)}" for a, b in zip(lo["lower"], lo["upper"])]
-        table["Low occurrences"] = lo["occurrences"].to_numpy()
-        low_cols = ["Low DL", "Low cluster range", "Low occurrences"]
-
-    table = table.iloc[::-1].reset_index(drop=True)  # newest day first
-
-    styler = table.style.hide(axis="index")
-    if high_cols:
-        styler = styler.set_properties(subset=high_cols, **{"background-color": HIGH_TINT})
-    if low_cols:
-        styler = styler.set_properties(subset=low_cols, **{"background-color": LOW_TINT})
-    widths = {"Date": "small", "High DH": "small", "High cluster range": "medium",
-              "High occurrences": "small", "Low DL": "small",
-              "Low cluster range": "medium", "Low occurrences": "small"}
-    col_cfg = {}
-    for name, w in widths.items():
-        if name not in table.columns:
-            continue
-        if "occurrences" in name:
-            col_cfg[name] = st.column_config.NumberColumn(name, width=w)
-        else:
-            col_cfg[name] = st.column_config.TextColumn(name, width=w)
-    st.dataframe(styler, width="stretch", column_config=col_cfg)
-
-    selected_types = [t for t, on in (("High", show_high_tbl), ("Low", show_low_tbl)) if on]
-    shown = zones[zones["zone_type"].isin(selected_types)]
-
-# ---------- Zone lanes chart ----------
+# ---------- Zone lanes charts: High and Low side by side ----------
 st.subheader("Zone chart")
 max_occ = max(int(zones["occurrences"].max()) if len(zones) else 1, 1)
 if st.session_state.get("min_occ", 1) > max_occ:
@@ -262,29 +252,65 @@ min_occ = r1[2].slider("Minimum occurrences to show", 1, max_occ, 1, key="min_oc
                        help="Hides zones with fewer occurrences than this.")
 
 shown_zones = zones[zones["occurrences"] >= min_occ]
-
 lane_taps = None
-lane_tap_total = int(shown_zones["tap_count"].sum())
-if lane_tap_total <= MAX_CHART_TAPS:
+if int(shown_zones["tap_count"].sum()) <= MAX_CHART_TAPS:
     lane_taps = taps_for_zones(candles, shown_zones[shown_zones["tap_count"] > 0], width)
 else:
     st.caption("Too many taps to draw dots. Raise the minimum occurrences.")
 
-fig, rows = build_lane_chart(candles, zones, lane_taps, chart_high, chart_low,
-                             fmt_price, min_occ)
-if fig is None:
+chart_sides = [k for k, on in (("High", chart_high), ("Low", chart_low)) if on]
+if not chart_sides:
     st.info("Tick Show High zones, Show Low zones, or both.")
-elif rows == 0:
-    st.info(f"No zones have {min_occ} or more occurrences. Lower the minimum.")
 else:
-    st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "responsive": True})
-    st.caption(f"{rows} zone rows with at least {min_occ} occurrence(s), ranked by occurrences. "
-               "Row labels end with (occurrences). Each row is one zone, so zones never overlap. "
-               "◆ = reference candle (occurrence 1). Dots = taps. Hover a bar for the zone's "
-               "details and a dot for that tap's details.")
-    if rows > 60:
-        st.warning(f"{rows} rows is a tall chart on a phone. Raise the minimum occurrences "
-                   "to show fewer.")
+    for col, kind in zip(st.columns(len(chart_sides)), chart_sides):
+        with col:
+            fig, rows = build_lane_chart(candles, zones, lane_taps,
+                                         kind == "High", kind == "Low", fmt_price, min_occ)
+            st.markdown(f"**{kind} zones**")
+            if fig is None or rows == 0:
+                st.info(f"No {kind} zones have {min_occ} or more occurrences.")
+            else:
+                st.plotly_chart(fig, width="stretch",
+                                config={"displaylogo": False, "responsive": True})
+                st.caption(f"{rows} rows · ◆ reference candle (occurrence 1) · dots = taps · "
+                           "hover a bar or dot for details.")
+                if rows > 60:
+                    st.warning(f"{rows} rows is tall on a phone. Raise the minimum occurrences.")
+
+# ---------- Hotspots: where High and Low zones were tapped most, combined ----------
+st.subheader("Hotspots · where High and Low zones were tapped most")
+st.caption("Each row is a price band. It counts every tap from High and Low zones whose "
+           "tested price falls inside that band, using the same width as the zones. "
+           "Bands don't overlap.")
+all_tap_total = int(zones["tap_count"].sum())
+if all_tap_total > EXPORT_TAP_LIMIT:
+    st.info("Too many taps to compute hotspots. Use a shorter date range.")
+elif all_tap_total == 0:
+    st.info("No taps in this range yet, so there are no hotspots.")
+else:
+    all_taps = taps_for_zones(candles, zones[zones["tap_count"] > 0], width)
+    hot = find_hotspots(all_taps, width, top_k=5)
+    hot_table = pd.DataFrame({
+        "Rank": hot["rank"].to_numpy(),
+        "Price band": [f"{fmt_price(a)} – {fmt_price(b)}"
+                       for a, b in zip(hot["low"], hot["high"])],
+        "Total taps": hot["total_taps"].to_numpy(),
+        "From High zones": hot["high_taps"].to_numpy(),
+        "From Low zones": hot["low_taps"].to_numpy(),
+        "Zones involved": hot["zones_involved"].to_numpy(),
+        "First tap": pd.to_datetime(hot["first_tap"]).dt.strftime("%Y-%m-%d").to_numpy(),
+        "Last tap": pd.to_datetime(hot["last_tap"]).dt.strftime("%Y-%m-%d").to_numpy(),
+    })
+    st.dataframe(hot_table.style.hide(axis="index"), width="stretch", column_config={
+        "Rank": st.column_config.NumberColumn("Rank", width="small"),
+        "Price band": st.column_config.TextColumn("Price band", width="medium"),
+        "Total taps": st.column_config.NumberColumn("Total taps", width="small"),
+        "From High zones": st.column_config.NumberColumn("From High", width="small"),
+        "From Low zones": st.column_config.NumberColumn("From Low", width="small"),
+        "Zones involved": st.column_config.NumberColumn("Zones", width="small"),
+        "First tap": st.column_config.TextColumn("First tap", width="small"),
+        "Last tap": st.column_config.TextColumn("Last tap", width="small"),
+    })
 
 # ---------- Zone details ----------
 st.subheader("Zone details")
