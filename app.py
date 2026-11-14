@@ -15,6 +15,7 @@ from db import list_scans, load_scan, save_scan
 from engine import filter_completed, scan, taps_for_zones
 from exporter import build_detail, build_summary, to_csv_bytes, to_excel_bytes
 from hotspots import find_hotspots
+from heatmap import build_heatmap
 
 MARKET = "spot"
 DEFAULT_EXCHANGE = "gate"
@@ -311,6 +312,25 @@ else:
         "First tap": st.column_config.TextColumn("First tap", width="small"),
         "Last tap": st.column_config.TextColumn("Last tap", width="small"),
     })
+
+# ---------- Heatmap: taps per day and price band ----------
+st.subheader("Heatmap · taps per day and price band")
+st.caption("Each cell is one price band on one day. Brighter means more zone taps landed in that "
+           "band that day. Dotted outlines mark the top 5 hotspots from the table above.")
+hm1, hm2 = st.columns(2)
+hm_high = hm1.checkbox("High", value=True, key="hm_high")
+hm_low = hm2.checkbox("Low", value=True, key="hm_low")
+if all_tap_total > EXPORT_TAP_LIMIT:
+    st.info("Too many taps to draw the heatmap. Use a shorter date range.")
+elif all_tap_total == 0:
+    st.info("No taps in this range yet, so there is nothing to show on the heatmap.")
+elif not (hm_high or hm_low):
+    st.info("Tick High, Low, or both to show the heatmap.")
+else:
+    hm_taps = taps_for_zones(candles, zones[zones["tap_count"] > 0], width)
+    hm_hot = find_hotspots(hm_taps, width, top_k=5)
+    fig = build_heatmap(candles, hm_taps, width, hm_high, hm_low, fmt_price, hm_hot)
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "responsive": True})
 
 # ---------- Zone details ----------
 st.subheader("Zone details")
