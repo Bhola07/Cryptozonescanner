@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from chart import build_lane_chart
+from chart import build_lane_chart, build_ranked_chart
 from data import SUPPORTED_EXCHANGES, TIMEFRAME, fetch_daily_ohlcv, gap_report
 from db import list_scans, load_scan, save_scan
 from engine import filter_completed, scan, taps_for_zones
@@ -346,6 +346,21 @@ else:
         "First tap": st.column_config.TextColumn("First tap", width="small"),
         "Last tap": st.column_config.TextColumn("Last tap", width="small"),
     })
+
+# ---------- Ranked chart: all zones, High and Low together, most taps first ----------
+st.subheader("Zone chart · all zones ranked by taps")
+st.caption("Every zone in one list, most taps at the top, matching the ranked table. The "
+           "minimum-occurrences filter above applies here too.")
+ranked_fig, ranked_rows = build_ranked_chart(candles, zones, lane_taps, fmt_price, min_occ)
+if ranked_fig is None:
+    st.info(f"No zones have {min_occ} or more occurrences.")
+else:
+    st.plotly_chart(ranked_fig, width="stretch",
+                    config={"displaylogo": False, "responsive": True})
+    st.caption(f"{ranked_rows} zones · green = High · red = Low · ◆ reference candle · "
+               "dots = taps · hover a bar or dot for details.")
+    if ranked_rows > 60:
+        st.warning(f"{ranked_rows} rows is tall on a phone. Raise the minimum occurrences.")
 
 # ---------- Heatmap: taps per day and price band ----------
 st.subheader("Heatmap · taps per day and price band")
