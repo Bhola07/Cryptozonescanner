@@ -6,6 +6,7 @@ import math
 import time
 from datetime import date, datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -239,6 +240,39 @@ else:
         with col:
             render_side_table(zones, kind)
     shown = zones[zones["zone_type"].isin(sides)]
+
+# ---------- Combined table: all zones, High and Low together, most tapped first ----------
+st.subheader("All zones ranked by taps")
+st.caption("High and Low zones together, from most taps to least. Type shows which side each "
+           "zone belongs to. Click a column header to re-sort.")
+ranked_zones = zones.sort_values(["tap_count", "reference_time"],
+                                 ascending=[False, False]).reset_index(drop=True)
+combo = pd.DataFrame({
+    "Rank": np.arange(1, len(ranked_zones) + 1),
+    "Type": ranked_zones["zone_type"].to_numpy(),
+    "Date": ranked_zones["reference_time"].dt.strftime("%Y-%m-%d").to_numpy(),
+    "DH/DL": ranked_zones["reference_price"].map(fmt_price).to_numpy(),
+    "Cluster range": [f"{fmt_price(a)} – {fmt_price(b)}"
+                      for a, b in zip(ranked_zones["lower"], ranked_zones["upper"])],
+    "Taps": ranked_zones["tap_count"].to_numpy(),
+    "Occurrences": ranked_zones["occurrences"].to_numpy(),
+})
+
+
+def tint_type(col):
+    return [f"background-color: {HIGH_TINT if v == 'High' else LOW_TINT}" for v in col]
+
+
+st.dataframe(combo.style.hide(axis="index").apply(tint_type, subset=["Type"]),
+             width="stretch", column_config={
+                 "Rank": st.column_config.NumberColumn("Rank", width="small"),
+                 "Type": st.column_config.TextColumn("Type", width="small"),
+                 "Date": st.column_config.TextColumn("Date", width="small"),
+                 "DH/DL": st.column_config.TextColumn("DH/DL", width="small"),
+                 "Cluster range": st.column_config.TextColumn("Cluster range", width="medium"),
+                 "Taps": st.column_config.NumberColumn("Taps", width="small"),
+                 "Occurrences": st.column_config.NumberColumn("Occurrences", width="small"),
+             })
 
 # ---------- Zone lanes charts: High and Low side by side ----------
 st.subheader("Zone chart")
