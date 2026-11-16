@@ -8,7 +8,7 @@ Lane charts: one horizontal row per zone. Rows are stacked, so zones never overl
 
 Two views:
 - build_lane_chart(): High and Low drawn separately (one chart per side).
-- build_ranked_chart(): every zone in one list, most taps first, like the ranked table.
+- build_joint_chart(): High and Low zones merged where they overlap in price.
 """
 
 import pandas as pd
@@ -167,18 +167,125 @@ def build_lane_chart(candles: pd.DataFrame, zones: pd.DataFrame, taps: pd.DataFr
     return _rows_chart(candles, zones, taps, selected, fmt, labels, separator_after=high_rows)
 
 
-def build_ranked_chart(candles: pd.DataFrame, zones: pd.DataFrame, taps: pd.DataFrame,
-                       fmt, min_occ: int):
+JOINT_HEX = "#f59e0b"  # amber: distinct from green (High) and red (Low)
+LABEL_BG = "rgba(15, 23, 42, 0.94)"
+HOVER_LEVELS = 3
+
+
+def merge_joint_zones(zones: pd.DataFrame) -> list:
     """
-    Every zone in one list, most taps first, matching the ranked table.
-    Returns (figure, number_of_rows), or (None, 0) if no zone qualifies.
+    Group High and Low zones that overlap in price into joint bands.
+    Display view only: the scan itself never merges zones.
+
+    To stop overlaps from chaining into one huge band, grouping is seeded:
+    the strongest unused zone (most occurrences) starts a band, and it collects only
+    the unused zones that overlap its own range. Each zone joins at most one band.
+    Each band: lower, upper, member zone_ids, High and Low counts, first reference date.
+    """
+    if len(zones) == 0:
+        return []
+    order = zones.sort_values(["occurrences", "reference_time"], ascending=[False, False])
+    rows = order.to_dict("records")
+    used = set()
+    bands = []
+    for seed in rows:
+        if seed["zone_id"] in used:
+            continue
+        s_lo, s_hi = seed["lower"], seed["upper"]
+        members = [r for r in rows
+                   if r["zone_id"] not in used
+                   and r["lower"] <= s_hi and s_lo <= r["upper"]]
+        for m in members:
+            used.add(m["zone_id"])
+        bands.append({
+            "lower": min(m["lower"] for m in members),
+            "upper": max(m["upper"] for m in members),
+            "ids": [m["zone_id"] for m in members],
+            "high": sum(m["zone_type"] == "High" for m in members),
+            "low": sum(m["zone_type"] == "Low" for m in members),
+            "first_ref": min(m["reference_time"] for m in members),
+        })
+    bands.sort(key=lambda b: b["lower"], reverse=True)
+    return bands
+
+
+def build_joint_chart(candles: pd.DataFrame, zones: pd.DataFrame, taps: pd.DataFrame,
+                      fmt, min_occ: int):
+    """
+    Price on the vertical axis, time on the horizontal axis.
+    Each joint band is drawn from its first reference date to the last candle,
+    labelled with its range and tap count, with a dot for every tap inside it.
+    Returns (figure, number_of_bands), or (None, 0) if no zone qualifies.
     """
     sub = zones[zones["occurrences"] >= min_occ]
-    sub = sub.sort_values(["tap_count", "reference_time"], ascending=[False, False])
-    selected = sub.to_dict("records")
-    if not selected:
+    bands = merge_joint_zones(sub)
+    if not bands:
         return None, 0
 
-    labels = [f"#{i + 1} {z['zone_type']} {fmt(z['lower'])} – {fmt(z['upper'])} "
-              f"({int(z['tap_count'])} taps)" for i, z in enumerate(selected)]
-    return _rows_chart(candles, zones, taps, selected, fmt, labels)
+    times = pd.DatetimeIndex(pd.to_datetime(candles["timestamp"], unit="ms", utc=True))
+    last_time = times.max()
+    fig = go.Figure()
+
+    for b in bands:
+        first_ref = pd.Timestamp(b["first_ref"])
+        rng = f"{fmt(b['lower'])} – {fmt(b['upper'])}"
+        band_taps = None
+        if taps is not None and len(taps):
+            band_taps = taps[taps["zone_id"].isin(set(b["ids"]))]
+        n_taps = 0 if band_taps is None else len(band_taps)
+
+        fig.add_shape(
+            type="rect", x0=first_ref, x1=last_time, y0=b["lower"], y1=b["upper"],
+            fillcolor=_rgba(JOINT_HEX, 0.22), line=dict(color=JOINT_HEX, width=1.5),
+            layer="below",
+        )
+        fig.add_annotation(
+            x=first_ref, y=b["upper"],
+            text=f"<b>{rng}</b><br>Taps: {n_taps} · High {b['high']} · Low {b['low']}",
+            showarrow=False, xanchor="left", yanchor="top", align="left",
+            font=dict(size=11, color=TEXT), bgcolor=LABEL_BG,
+            bordercolor=JOINT_HEX, borderwidth=1, borderpad=3,
+        )
+
+        detail = (
+            f"<b>Joint zone</b><br>"
+            f"Range: {rng}<br>"
+            f"Zones merged: {len(b['ids'])} (High {b['high']} · Low {b['low']})<br>"
+            f"Taps in this zone: {n_taps}<br>"
+            f"First reference: {first_ref:%Y-%m-%d}"
+        )
+        span = times[times >= first_ref]
+        for i in range(HOVER_LEVELS):
+            y = b["lower"] + (b["upper"] - b["lower"]) * i / (HOVER_LEVELS - 1)
+            fig.add_trace(go.Scatter(
+                x=span, y=[y] * len(span), mode="markers",
+                marker=dict(size=14, color="rgba(0,0,0,0)"),
+                hovertext=[detail] * len(span), hoverinfo="text", showlegend=False,
+            ))
+
+        if band_taps is not None and len(band_taps):
+            tap_hover = [
+                f"<b>Tap · {r['zone_type']} zone</b><br>"
+                f"Tapped on: {r['tap_time']:%Y-%m-%d}<br>"
+                f"Joint zone: {rng}<br>"
+                f"Candle high: {fmt(r['tap_high'])}<br>"
+                f"Candle low: {fmt(r['tap_low'])}<br>"
+                f"Tested price: {fmt(r['tested_price'])}"
+                for _, r in band_taps.iterrows()
+            ]
+            fig.add_trace(go.Scatter(
+                x=band_taps["tap_time"], y=band_taps["tested_price"], mode="markers",
+                marker=dict(size=8, color=JOINT_HEX, line=dict(color="#ffffff", width=1)),
+                hovertext=tap_hover, hoverinfo="text", showlegend=False,
+            ))
+
+    height = max(420, 120 + len(bands) * 12)
+    fig.update_layout(
+        height=height, autosize=True, hovermode="closest",
+        paper_bgcolor=BG, plot_bgcolor=BG, font=dict(color=TEXT, size=12),
+        hoverlabel=dict(bgcolor=HOVER_BG, font=dict(color=TEXT, size=13)),
+        margin=dict(l=10, r=20, t=20, b=10), showlegend=False,
+    )
+    fig.update_xaxes(gridcolor=GRID, zeroline=False, showline=False)
+    fig.update_yaxes(gridcolor=GRID, zeroline=False, title_text="Price")
+    return fig, len(bands)
